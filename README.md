@@ -1,12 +1,7 @@
-# Classify Consonant Types
+# Classify (Korean) consonant types
 
-Lightweight pipeline for training and evaluating a classifier on Korean consonant categories using audio + metadata. Includes simple CLI, reproducible environment, and examples for training and inference. Files in this repo include `run.py`, `predict.py`, shell helpers (`train.sh`, `test.sh`), a `src/` package, and a conda `environment.yml` to reproduce the setup.
+Pipeline for training and evaluating a classifier on Korean consonant categories using audio + metadata. Files in this repo include `run.py`, `predict.py`, shell helpers (`train.sh`, `test.sh`), a `src/` package, and a conda `environment.yml` to reproduce the setup.
 
-## Features
-- **One-command training & inference** via `run.py`
-- **Conda environment** for reproducibility (`environment.yml`)
-- **Pluggable models** and utilities under `src/`
-- **Shell helpers** (`train.sh`, `test.sh`) for common workflows
 
 ## Project structure
 ```
@@ -28,7 +23,7 @@ conda env create -f environment.yml
 conda activate classifyenv
 ```
 
-### 2) (Optional) Set up secrets via `.env`
+### 2) Set up secrets via `.env`
 If you use any private services (e.g., Hugging Face), keep tokens out of code:
 ```bash
 # in project root
@@ -51,7 +46,7 @@ Training expects a **CSV** pointing to audio files. Minimal columns you’ll lik
 - `label`: target consonant class (e.g., `plain`, `tense`, `aspirated`)
 - (optional) other metadata you want to use as features or for analysis
 
-> Tip: keep your raw audio under `data/audio/` and **don’t** commit large audio to git. Use `.gitignore` / external storage.
+> Tip: keep your raw audio under `data/audio/` and metadata under data/*.csv. 
 
 ## Quick start
 
@@ -72,12 +67,6 @@ python run.py --mode inference   --csv data/T_all.csv   --audio_dir data/audio  
 python predict.py --audio path/to/file.wav --model_path model/classifier.pt
 ```
 
-### Shell helpers
-```bash
-bash train.sh
-bash test.sh
-```
-
 ## Command-line options
 
 Common flags supported by `run.py`:
@@ -88,5 +77,3 @@ Common flags supported by `run.py`:
 - `--epochs N` – training epochs (train mode)
 - `--split FLOAT` – train/valid split ratio (train mode)
 - `--model_path PATH` – checkpoint to save (train) or load (inference)
-
-> Run `python run.py -h` to see the full set of arguments and defaults.
