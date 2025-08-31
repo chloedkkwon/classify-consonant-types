@@ -24,7 +24,7 @@ conda activate classifyenv
 ```
 
 ### 2) Set up secrets via `.env`
-If you use any private services (e.g., Hugging Face), keep tokens out of code:
+If you are using Hugging Face:
 ```bash
 # in project root
 echo "HUGGINGFACE_HUB_TOKEN=hf_..." >> .env
