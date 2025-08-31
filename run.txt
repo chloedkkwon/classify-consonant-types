@@ -1,0 +1,4 @@
+conda activate classifyenv
+cd /Users/chloekwon/Desktop/projects/classify_sound_classes
+python run.py --mode train --csv data/T_all.csv --audio_dir data/audio --epochs 10 --split 0.80
+python run.py --mode inference --csv data/T_all.csv --audio_dir data/audio --model_path classifier.pt
