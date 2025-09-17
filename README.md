@@ -90,7 +90,7 @@ python run.py --mode test \
     --results-file results/detailed_results.csv
 ```
 
-## ⚙Configuration
+## Configuration
 
 ### Environment Variables
 
@@ -113,7 +113,7 @@ python run.py --mode test \
 - **Training Strategy**: Two-phase (freeze backbone → fine-tune all)
 - **Architecture**: HuBERT + classification head
 
-## 📊 Results
+## Results
 
 After training, the model will be saved to `model/best.pt`. Test results include:
 
@@ -155,7 +155,7 @@ docker run --gpus all \
 
 See `Dockerfile` and `docker-compose.yml` for complete containerization setup.
 
-## 📝 Data Format
+## Data Format
 
 ### CSV Requirements
 
