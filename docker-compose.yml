@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  hubert-classifier:
+    build: .
+    image: hubert-korean-classifier:latest
+    container_name: korean-consonant-classifier
+    
+    # GPU support (requires nvidia-docker)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # Mount data and model directories
+    volumes:
+      - ./data:/app/data:ro  # Read-only data mount
+      - ./model:/app/model   # Read-write model mount
+      - ./results:/app/results  # Results output
+    
+    # Environment variables
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONPATH=/app
+      - CSV_FILE=/app/data/T_all.csv
+      - AUDIO_DIR=/app/data/audio
+      - OUTPUT_DIR=/app/model
+    
+    # Working directory
+    working_dir: /app
+    
+    # Keep container running
+    tty: true
+    stdin_open: true
+    
+    # Network mode (optional)
+    network_mode: "host"
+    
+    # Use conda environment for all commands
+    command: ["conda", "run", "--no-capture-output", "-n", "classifyenv", "bash"]
+
+  # Optional: CPU-only version for inference
+  hubert-classifier-cpu:
+    build: 
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: hubert-korean-classifier:cpu
+    container_name: korean-consonant-classifier-cpu
+    
+    volumes:
+      - ./data:/app/data:ro
+      - ./model:/app/model:ro  # Read-only for inference
+      - ./results:/app/results
+    
+    environment:
+      - PYTHONPATH=/app
+      - CSV_FILE=/app/data/T_all.csv
+      - AUDIO_DIR=/app/data/audio
+      - OUTPUT_DIR=/app/model
+    
+    working_dir: /app
+    tty: true
+    stdin_open: true
+    
+    # Use conda environment for all commands
+    command: ["conda", "run", "--no-capture-output", "-n", "classifyenv", "bash"]
+    
+    profiles: ["cpu"]  # Only start with --profile cpu

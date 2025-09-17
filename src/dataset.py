@@ -1,56 +1,37 @@
-import torch
+import torch, torchaudio
 from torch.utils.data import Dataset
-from torch.nn.utils.rnn import pad_sequence
-import pandas as pd
-import torchaudio
 import os
 
-label_dict = {"plain": 0, "tense": 1, "aspirated": 2}
-
 class KoreanStopDataset(Dataset):
-    def __init__(self, dataframe, audio_dir):
-        self.data = dataframe
+    def __init__(self, df, audio_dir, label_col="cons_type", label2id=None, target_sr=16000):
+        """
+        df: pnadas DataFrame with columns ["fname", label_col]
+        audio_dir: directory where audio files are stored
+        label_col: column name for labels
+        label2id: dictionary mapping label strings to integer ids
+        """
+        self.df = df
         self.audio_dir = audio_dir
-        self.resampler = torchaudio.transforms.Resample(orig_freq=48000, new_freq=16000)
+        self.label_col = label_col
+        self.label2id = label2id or {l: i for i, l in enumerate(sorted(df[label_col].unique()))}
+        self.target_sr = target_sr
+
+        self.file_col = "path" if "path" in self.df.columns else "fname"
 
     def __len__(self):
-        return len(self.data)
+        return len(self.df)
+    
+    def _load_resample_mono(self, fullpath):
+        wav, sr = torchaudio.load(fullpath) # (C, T)
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)  # convert to mono by averaging channels
+        if sr != self.target_sr:
+            wav = torchaudio.transforms.Resample(sr, self.target_sr)(wav)
+        return wav.squeeze(0)  # return as 1D tensor (T,)
 
     def __getitem__(self, idx):
-        row = self.data.iloc[idx]
-        wav_path = os.path.join(self.audio_dir, row["fname"] + ".wav")
-        waveform, sr = torchaudio.load(wav_path)
-
-        if sr != 16000:
-            waveform = self.resampler(waveform)
-
-        label = label_dict[row["cons_type"]]  # <-- update
-        return waveform.squeeze(), torch.tensor(label)
-
-def collate_fn(batch):
-    """
-    Pads input waveforms.
-    Args:
-        batch: List of (waveform_tensor, label)
-    Returns:
-        input_values: Padded audio tensor [batch, max_len]
-        labels: Tensor of shape [batch]
-    """
-    waveforms, labels = zip(*batch)
-    padded_waveforms = pad_sequence(waveforms, batch_first=True, padding_value=0) 
-    # print("Padded:", padded_waveforms.shape)
-    
-    # Reshape the padded waveforms to have shape [batch_size, 1, max_length]
-    # 1 is the number of channels (since we're working with raw waveforms)
-    # padded_waveforms = padded_waveforms.unsqueeze(1)  # Adding the channels dimension
-    # print("Padded-squeezed:", padded_waveforms.shape)
-
-    # input = model(padded_waveforms) 
-
-    # inputs = processor(padded_waveforms, sampling_rate=16000, return_tensors="pt", padding=True)
-    # input_values = inputs.input_values  # [batch, max_length]
-    # print("Input shape:", input_values.shape)
-
-    labels = torch.tensor(labels)
-
-    return padded_waveforms, labels
+        row = self.df.iloc[idx]
+        wav_path = row["path"] if "path" in row else os.path.join(self.audio_dir, row["fname"] + ".wav")
+        waveform = self._load_resample_mono(wav_path)
+        label = self.label2id[row[self.label_col]]
+        return {"input_values": waveform, "labels": label}

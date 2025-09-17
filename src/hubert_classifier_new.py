@@ -1,0 +1,296 @@
+import math
+import os
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from torch.nn.utils import clip_grad_norm_
+
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    get_cosine_schedule_with_warmup,
+)
+
+# --- Configure hyperparameters ---
+@dataclass
+class FTConfig:
+    model_id: str = "team-lucid/hubert-large-korean"
+    num_labels: int = 3
+    id2label: Optional[Dict[int, str]] = None
+    label2id: Optional[Dict[str, int]] = None
+
+    # audio
+    target_sr: int = 16000
+    max_seconds: float = 3.0 # crop to 3 sec for memory
+
+    # training
+    tune_model: str = "two_phase" # "two-phase" (head -> full), "full" (encoder + head), "head" (train only the linear head)
+    freeze_epochs: int = 3
+    ft_epochs: int = 5
+    lr_head: float = 2e-4 # learning rate for training the classification head (for fine-tuning)
+    lr_all: float = 1e-5 # learning rate after fine-tuning
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.1
+    grad_clip: float = 1.0
+    fp16: bool = True # mixed precision on CUDA
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # regularization
+    spec_augment: bool = False
+    time_mask_param: int = 40
+    freq_mask_param: int = 16
+
+    # class imbalance
+    class_weights: Optional[List[float]] = None
+
+    # logging/saving
+    log_every: int = 50
+    output_dir: int = "model/"
+
+# --- Model head ---
+class HuBERTClassifier(nn.Module):
+    """
+    A classifier model with a HuBERT encoder and a classification head.
+    """
+    def __init__(self, cfg: FTConfig):
+        super().__init__()
+        self.cfg = cfg
+
+        # Load the base config and attach classification label metadata
+        hcfg = AutoConfig.from_pretrained(
+            cfg.model_id, 
+            num_labels=cfg.num_labels, 
+            id2label=cfg.id2label,
+            label2id=cfg.label2id,
+        )
+        self.encoder = AutoModel.from_pretrained(cfg.model_id, config=hcfg)
+
+        hidden = hcfg.hidden_size
+
+        self.pool = nn.AdaptiveAvgPool1d(1) # average pooling
+        self.dropout = nn.Dropout(0.1)
+        self.classifier = nn.Linear(hidden, cfg.num_labels) # Linear head
+
+    def forward(self, input_values, attention_mask=None, labels=None):
+        """
+        input_values: (B, T) float32
+        attention_mask: (B, T) 1 for valid, 0 for padding
+        """
+        enc_out = self.encoder(input_values=input_values,
+                               attention_mask=attention_mask,
+                               output_hidden_states=False)
+        
+        x = enc_out.last_hidden_state.transpose(1, 2) # (B, T', H) -> (B, H, T')
+        x = self.pool(x).squeeze(-1) # average over time -> (B, H)
+        x = self.dropout(x)
+        logits = self.classifier(x) # Linear layer -> logits (B, num_labels)
+
+        loss = None
+        if labels is not None:
+            if self.cfg.class_weights is not None:
+                cw = torch.tensor(self.cfg.class_weights,
+                                  dtype=torch.float32,
+                                  device=logits.device)
+                loss_fn = nn.CrossEntropyLoss(weight=cw)
+            else:
+                loss_fn = nn.CrossEntropyLoss()
+            loss = loss_fn(logits, labels)
+        return {"logits": logits, "loss": loss}
+
+# --- Helper functions ---
+def freeze_encoder(model: HuBERTClassifier):
+    # Freeze the encoder parameters (to train only the head for fine-tuning)
+    for p in model.encoder.parameters():
+        p.requires_grad = False
+
+def unfreeze_encoder(model: HuBERTClassifier):
+    # Unfreeze the encoder parameters (to make encoder trainable again)
+    for p in model.encoder.parameters():
+        p.requires_grad = True
+
+def spec_augment_waveform(batch: Dict[str, torch.Tensor],
+                          cfg: FTConfig):
+    """
+    Apply SpecAugment on the waveform by zeroing out random time spans.
+    """
+    if not cfg.spec_augment:
+        return batch
+    x = batch["input_values"] # (B, T)
+    B, T = x.shape
+
+    max_len = min(cfg.time_mask_param, T // 10 + 1)
+    for b in range(B): 
+        span = torch.randint(low=1, high=max_len, size=(1,)).item()
+        start = torch.randint(low=0, high=max(1, T - span), size=(1,)).item()
+        x[b, start:start+span] = 0.0
+    return batch
+
+# --- Prep audio input ---
+class AudioCollator:
+    """
+    Pads waveforms to the longest in batch and builds attention_mask.
+    Optionally truncates very long clips for memory.
+    """
+    def __init__(self, target_sr: int, max_seconds: float=None):
+        self.target_sr = target_sr
+        self.max_len = int(target_sr * max_seconds) if max_seconds else None
+
+    def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
+        """ 
+        Convert to torch tensors and pad to the longest in batch
+        Also build attention_mask.
+        features: each has {"input_values": 1D numpy/torch, "labels": int} 
+        """
+        waves = []
+        labels = []
+        for f in features:
+            w = torch.as_tensor(f["input_values"], dtype=torch.float32)
+            if self.max_len is not None and w.shape[0] > self.max_len:
+                # random crop if too long
+                start = torch.randint(0, w.shape[0] - self.max_len + 1, (1,)).item()
+                w = w[start:start + self.max_len]
+            waves.append(w)
+            labels.append(f["labels"])
+
+        lengths = [len(w) for w in waves]
+        maxlen = max(lengths)
+        padded = torch.zeros(len(waves), maxlen, dtype=torch.float32)
+        attn = torch.zeros(len(waves), maxlen, dtype=torch.long)
+        for i, w in enumerate(waves):
+            L = w.shape[0]
+            padded[i, :L] = w
+            attn[i, :L] = 1
+
+        batch = {"input_values": padded, "attention_mask": attn, "labels": torch.tensor(labels, dtype=torch.long)}
+        return batch
+    
+
+# --- Train / Eval loops --- 
+def run_epoch(model, loader, optimizer, scheduler, scaler, 
+              cfg: FTConfig, train: bool = True):
+    model.train(train)
+    total_loss, total_n = 0.0, 0
+    correct = 0
+
+    for step, batch in enumerate(loader):
+        batch = {k: v.to(cfg.device) for k, v in batch.items()}
+        batch = spec_augment_waveform(batch, cfg) if train else batch
+
+        def fwd():
+            out = model(input_values=batch["input_values"],
+                        attention_mask=batch["attention_mask"],
+                        labels=batch["labels"])
+            return out["loss"], out["logits"]
+        
+        if train:
+            optimizer.zero_grad(set_to_none=True)
+            if cfg.fp16 and scaler is not None:
+                with torch.cuda.amp.autocast():
+                    loss, logits = fwd()
+                scaler.scale(loss).backward()
+                clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss, logits = fwd()
+                loss.backward()
+                clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                optimizer.step()
+            
+            if scheduler is not None:
+                scheduler.step()
+        else:
+            with torch.no_grad():
+                loss, logits = fwd()
+        
+        total_loss += float(loss.detach()) * batch["labels"].size(0)
+        total_n += batch["labels"].size(0)
+        preds = logits.argmax(-1)
+        correct += (preds == batch["labels"]).sum().item()
+
+    avg_loss = total_loss / max(1, total_n)
+    acc = correct / max(1, total_n)
+    return avg_loss, acc
+
+def fit_two_phases(model: HuBERTClassifier, 
+                   train_loader: DataLoader,
+                   val_loader: DataLoader,
+                   cfg: FTConfig):
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    model.to(cfg.device)
+
+    # Phase 1: Freeze WavLM (encoder), train head
+    if cfg.freeze_epochs > 0:
+        freeze_encoder(model)
+        head_params = [p for n, p in model.named_parameters() if p.requires_grad]
+        opt = AdamW(head_params, lr=cfg.lr_head, weight_decay=cfg.weight_decay)
+
+        # Cosine schedule with warmup over total steps in phase 1
+        num_steps = math.ceil(len(train_loader) * cfg.freeze_epochs)
+        warmup = int(num_steps * cfg.warmup_ratio)
+        sch = get_cosine_schedule_with_warmup(opt, warmup, num_steps)
+
+        scaler = torch.cuda.amp.GradScaler() if (cfg.fp16 and cfg.device.startswith("cuda")) else None
+
+        best_val = float("inf")
+        best_path = os.path.join(cfg.output_dir, "best_head.pt")
+
+        for ep in range(1, cfg.freeze_epochs + 1):
+            tr_loss, tr_acc = run_epoch(model, train_loader, opt, sch, scaler, cfg, train=True)
+            va_loss, va_acc = run_epoch(model, val_loader, None, None, None, cfg, train=False)
+            print(f"[Freeze] epoch {ep}/{cfg.freeze_epochs} | train loss {tr_loss:.4f} acc {tr_acc:.4f} | ")
+            if va_loss < best_val:
+                best_val = va_loss
+                torch.save(model.state_dict(), best_path)
+        
+        # load best head
+        if os.path.exists(best_path):
+            model.load_state_dict(torch.load(best_path, map_location=cfg.device))
+    
+    # Phase 2: Unfreeze encoder, train all
+    unfreeze_encoder(model)
+    opt = AdamW(model.parameters(), lr=cfg.lr_all, weight_decay=cfg.weight_decay)
+    num_steps = math.ceil(len(train_loader) * cfg.ft_epochs)
+    warmup = int(num_steps * cfg.warmup_ratio)
+    sch = get_cosine_schedule_with_warmup(opt, warmup, num_steps)
+
+    scaler = torch.cuda.amp.GradScaler() if (cfg.fp16 and cfg.device.startswith("cuda")) else None
+
+    best_val = float("inf")
+    best_path = os.path.join(cfg.output_dir, "best.pt")
+
+    for ep in range(1, cfg.ft_epochs + 1):
+        tr_loss, tr_acc = run_epoch(model, train_loader, opt, sch, scaler, cfg, train=True)
+        va_loss, va_acc = run_epoch(model, val_loader, None, None, None, cfg, train=False)
+        print(f"[FT] epoch {ep}/{cfg.ft_epochs} | train loss {tr_loss:.4f} acc { tr_acc:.3f} | "
+              f"val loss {va_loss:.4f} acc {va_acc:.3f}")
+        if va_loss < best_val:
+            best_val = va_loss
+            torch.save(model.state_dict(), best_path)
+    
+    return os.path.join(cfg.output_dir, "best.pt")
+
+
+def build_model(cfg: FTConfig) -> HuBERTClassifier:
+    return HuBERTClassifier(cfg)
+
+def train_finetune(train_loader: DataLoader, 
+                   val_loader: DataLoader, cfg:FTConfig):
+    model = build_model(cfg)
+    ckpt = fit_two_phases(model, train_loader, val_loader, cfg)
+    print(f"Saved best model to: {ckpt}")
+    return ckpt, None # return processor so run.py can save it too
+
+def load_for_inference(cfg: FTConfig, ckpt_path: str) -> HuBERTClassifier:
+    model = build_model(cfg)
+    sd = torch.load(ckpt_path, map_location=cfg.device)
+    model.load_state_dict(sd)
+    model.to(cfg.device).eval()
+    return model
+
+

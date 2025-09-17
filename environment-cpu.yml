@@ -1,7 +1,8 @@
-les fname: classifyenv
+name: classifyenv
 channels:
   - conda-forge
   - defaults
+  - pytorch
 dependencies:
   - bzip2=1.0.8=hfdf4475_7
   - ca-certificates=2025.8.3=hbd8a1cb_0
@@ -21,6 +22,11 @@ dependencies:
   - setuptools=80.9.0=pyhff2d567_0
   - tk=8.6.13=hf689a15_2
   - wheel=0.45.1=pyhd8ed1ab_1
+  # CPU-only PyTorch from conda-forge
+  - cpuonly
+  - pytorch::pytorch=2.2.2
+  - pytorch::torchaudio=2.2.2
+  - pytorch::torchvision=0.17.2
   - pip:
       - aiohappyeyeballs==2.6.1
       - aiohttp==3.12.14
@@ -74,11 +80,8 @@ dependencies:
       - soundfile==0.13.1
       - soxr==0.5.0.post1
       - sympy==1.14.0
-      - threadpoolctl==3.6.0
+      - threadpoolctl==3.6.1
       - tokenizers==0.21.4
-      - torch==2.2.2
-      - torchaudio==2.2.2
-      - torchvision==0.17.2
       - tqdm==4.67.1
       - transformers==4.54.0
       - typing-extensions==4.14.1
@@ -86,4 +89,3 @@ dependencies:
       - urllib3==2.5.0
       - xxhash==3.5.0
       - yarl==1.20.1
-prefix: /Users/chloekwon/opt/anaconda3/envs/classifyenv

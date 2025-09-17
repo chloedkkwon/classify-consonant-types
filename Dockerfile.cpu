@@ -1,0 +1,41 @@
+# CPU-only version for inference using conda
+FROM continuumio/miniconda3:latest
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libsndfile1 \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy conda environment file for CPU
+COPY environment-cpu.yml .
+
+# Create conda environment
+RUN conda env create -f environment-cpu.yml
+
+# Make RUN commands use the new environment
+SHELL ["conda", "run", "-n", "classifyenv", "/bin/bash", "-c"]
+
+# Verify installation
+RUN conda run -n classifyenv python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
+
+# Create directories
+RUN mkdir -p data model src results
+
+# Copy source code
+COPY src/ ./src/
+COPY run.py .
+COPY run.sh .
+
+# Make run.sh executable
+RUN chmod +x run.sh
+
+# Set environment variables
+ENV PYTHONPATH=/app
+
+# Default command
+CMD ["conda", "run", "--no-capture-output", "-n", "classifyenv", "bash"]
