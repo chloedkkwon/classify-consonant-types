@@ -1,6 +1,6 @@
 # HuBERT Korean Consonant Classification
 
-A deep learning project for classifying Korean stop consonant types (aspirated, tense, plain) using HuBERT (Hidden-Unit BERT) transformer models.
+A deep learning project for classifying Korean stop consonant types (aspirated, tense, plain) using HuBERT transformer models.
 
 ## Project Overview
 
