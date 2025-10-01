@@ -32,7 +32,7 @@ class FTConfig:
     tune_model: str = "two_phase" # "two-phase" (head -> full), "full" (encoder + head), "head" (train only the linear head)
     freeze_epochs: int = 3
     ft_epochs: int = 5
-    lr_head: float = 2e-4 # learning rate for training the classification head (for fine-tuning)
+    lr_head: float = 2e-4 # learning rate for training the classification head
     lr_all: float = 1e-5 # learning rate after fine-tuning
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
@@ -55,7 +55,7 @@ class FTConfig:
 # --- Model head ---
 class HuBERTClassifier(nn.Module):
     """
-    A classifier model with a HuBERT encoder and a classification head.
+    A classifier model with a HuBERT encoder and a classification head for fine-tuning.
     """
     def __init__(self, cfg: FTConfig):
         super().__init__()
@@ -76,40 +76,14 @@ class HuBERTClassifier(nn.Module):
         self.dropout = nn.Dropout(0.1)
         self.classifier = nn.Linear(hidden, cfg.num_labels) # Linear head
 
-    def forward(self, input_values, attention_mask=None, labels=None):
-        """
-        input_values: (B, T) float32
-        attention_mask: (B, T) 1 for valid, 0 for padding
-        """
-        enc_out = self.encoder(input_values=input_values,
-                               attention_mask=attention_mask,
-                               output_hidden_states=False)
-        
-        x = enc_out.last_hidden_state.transpose(1, 2) # (B, T', H) -> (B, H, T')
-        x = self.pool(x).squeeze(-1) # average over time -> (B, H)
-        x = self.dropout(x)
-        logits = self.classifier(x) # Linear layer -> logits (B, num_labels)
-
-        loss = None
-        if labels is not None:
-            if self.cfg.class_weights is not None:
-                cw = torch.tensor(self.cfg.class_weights,
-                                  dtype=torch.float32,
-                                  device=logits.device)
-                loss_fn = nn.CrossEntropyLoss(weight=cw)
-            else:
-                loss_fn = nn.CrossEntropyLoss()
-            loss = loss_fn(logits, labels)
-        return {"logits": logits, "loss": loss}
-
 # --- Helper functions ---
 def freeze_encoder(model: HuBERTClassifier):
-    # Freeze the encoder parameters (to train only the head for fine-tuning)
+    # Freeze the encoder parameters for warm-up
     for p in model.encoder.parameters():
         p.requires_grad = False
 
 def unfreeze_encoder(model: HuBERTClassifier):
-    # Unfreeze the encoder parameters (to make encoder trainable again)
+    # Unfreeze the encoder parameters (to make encoder trainable again for fine tuning)
     for p in model.encoder.parameters():
         p.requires_grad = True
 

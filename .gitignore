@@ -4,6 +4,7 @@ __pycache__/
 *.so
 .vscode
 analysis/
+.gitignore
 
 # Data
 data/*.csv
@@ -21,3 +22,5 @@ model/*.pt
 
 # OS
 .DS_Store
+
+
